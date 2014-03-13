@@ -24,6 +24,10 @@ class exports.Connection extends EventEmitter
         @rcv_conn_id = null
         @snd_conn_id = null
         @resend = 0
+        @rtt = 0
+        @rtt_var = 0
+        @timeout = 1000
+        @timeoutTID = null
         
         @remotePort = null
         @remoteAddress = null
@@ -38,6 +42,10 @@ class exports.Connection extends EventEmitter
         @socket = dgram.createSocket 'udp4'
         
         @socket.on 'message', (msg, rinfo) =>
+            if @timeoutTID isnt null
+                clearTimeout @timeoutTID
+                @timeoutTID = setTimeout @_timeout.bind(this), @timeout
+            
             packet = @_parsePacket msg
             
             if packet.type > 5 then return
@@ -45,7 +53,7 @@ class exports.Connection extends EventEmitter
             if @connected and packet.conn_id isnt @snd_conn_id then return
             
             @wnd_size = packet.wnd_size
-            timestamp = (new Date().getTime() % 1000) * 1000
+            timestamp = Math.round(process.hrtime()[1] / 1000)
             @reply_micro = timestamp - packet.timestamp
             
             # Handle acks exclusively.
@@ -80,8 +88,7 @@ class exports.Connection extends EventEmitter
                     @connected = true
                     @emit 'connected'
                 else
-                    # delta = @rtt - 
-                    @emit 'ack', packet.ack_nr
+                    @emit 'ack', packet
             
             if packet.type is 3 then @socket.close()
             if packet.type is 4 and not @connected
@@ -121,7 +128,7 @@ class exports.Connection extends EventEmitter
         
         if (@cur_window + data.length) <= Math.min(@max_window, @wnd_size)
             first = (16 * type) | @version
-            timestamp = (new Date().getTime() % 1000) * 1000
+            timestamp = Math.round(process.hrtime()[1] / 1000)
             
             if data.length isnt 0
                 @cur_window += data.length
@@ -143,12 +150,19 @@ class exports.Connection extends EventEmitter
             @socket.send final, 0, final.length, @remotePort, @remoteAddress
             
             if type is 0
+                console.log 'rtt', @timeout
                 [seq_nr, i] = [@seq_nr, 0]
                 
-                handler = (ack_nr) =>
-                    if ack_nr >= seq_nr
+                handler = (packet) =>
+                    if packet.ack_nr >= seq_nr
+                        currTimestamp = Math.round(process.hrtime()[1] / 1000)
+                        
                         @bytesWritten += data.length
                         @cur_window -= data.length
+                        delta = @rtt - (currTimestamp - timestamp)
+                        @rtt_var += (Math.abs(delta) - @rtt_var) / 4
+                        @rtt += ((@reply_micro + packet.reply_micro) - @rtt) / 8
+                        @timeout = Math.max(@rtt + @rtt_var * 4, 500)
                         if cb? then cb()
                     else
                         if @resend is 0 then ++i
@@ -171,6 +185,7 @@ class exports.Connection extends EventEmitter
     address: -> @socket.address()
     unref: -> @socket.unref()
     ref: -> @socket.ref()
+    end: -> @socket.close()
     
     _parsePacket: (msg) ->
         first = msg.readUInt8(0)
@@ -188,3 +203,9 @@ class exports.Connection extends EventEmitter
             payload: msg.slice(20)
         
         out
+    
+    _timeout: ->
+        console.log 'TIMEOUT'
+        @emit 'timeout'
+        @write 3
+        @socket.close()
