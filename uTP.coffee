@@ -1,4 +1,4 @@
-# uTP - uTorrent Transport Protocol
+# uTP - Micro Transport Protocol
 #
 #   'The motivation for uTP is for BitTorrent clients to not disrupt internet 
 #    connections, while still utilizing the unused bandwidth fully.'
@@ -8,7 +8,7 @@ stream = require 'stream'
 dgram = require 'dgram'
 {EventEmitter} = require 'events'
 
-class exports.Connection extends EventEmitter
+class Connection extends EventEmitter
     constructor: ->
         # Plumbing stuff
         @version = 1
@@ -41,6 +41,8 @@ class exports.Connection extends EventEmitter
         
         @bytesRead = 0
         @bytesWritten = 0
+        
+        @encoding = null
         
         # Operational logic
         @socket = dgram.createSocket 'udp4'
@@ -79,20 +81,25 @@ class exports.Connection extends EventEmitter
                         else @once 'sack', handler
                     
                     @once 'sack', handler
-                    @write 2
+                    @send 2
                     return
             
             if packet.type is 0 and @connected
                 @bytesRead += packet.payload.length
-                @emit 'data', packet.payload, packet.conn_id
                 @emit 'sack', @ack_nr
-                @write 2
+                @send 2
+                
+                if not @encoding? then @emit 'data', packet.payload
+                else @emit 'data', packet.payload.toString(@encoding)
             
-            if packet.type is 1 then @socket.close()
+            if packet.type is 1
+                @emit 'end'
+                @socket.close()
+            
             if packet.type is 2
                 if not @connected
                     @connected = true
-                    @emit 'connected'
+                    @emit 'connect'
                 else
                     @emit 'ack', packet
             
@@ -107,8 +114,8 @@ class exports.Connection extends EventEmitter
                 
                 @seq_nr = crypto.pseudoRandomBytes(2).readUInt16BE(0)
                 
-                @write 2
-                @emit 'connected'
+                @send 2
+                @emit 'connect'
         
         @socket.on 'error', (err) => @emit 'error', err
         @socket.on 'close', => @emit 'close'
@@ -120,15 +127,17 @@ class exports.Connection extends EventEmitter
         @snd_conn_id = crypto.pseudoRandomBytes(2).readUInt16BE(0)
         @rcv_conn_id = @snd_conn_id + 1
         
-        @write 4
+        @send 4
         
-        @once 'connected', =>
+        @once 'connect', =>
+            if connListener? then connListener()
+            
             address = @address()
             
             @localPort = address.port
             @localAddress = address.address
     
-    write: (type, data, encoding, cb) ->
+    send: (type, data, encoding, cb) ->
         if not data? then data = new Buffer 0
         data = new Buffer data, encoding
         
@@ -199,7 +208,7 @@ class exports.Connection extends EventEmitter
                         @timeout = @timeout * 2
                         
                         if data.length > 150
-                            write type, data, encoding, cb
+                            @send type, data, encoding, cb
                         else
                             @socket.send final, 0, final.length, @remotePort, @remoteAddress
                             timeoutTID = setTimeout handler, @timeout
@@ -208,12 +217,15 @@ class exports.Connection extends EventEmitter
                 timeoutTID = setTimeout handler, @timeout
         else
             # Wait for an ack and then retry sending the message.
-            @once 'ack', => @write type, data, encoding, cb
+            @once 'ack', => @send type, data, encoding, cb
     
+    setEncoding: (encoding) -> @encoding = encoding
     address: -> @socket.address()
     unref: -> @socket.unref()
     ref: -> @socket.ref()
-    end: -> @socket.close()
+    end: ->
+        @send 1
+        @socket.close()
     
     _parsePacket: (msg) ->
         first = msg.readUInt8(0)
@@ -241,3 +253,8 @@ class exports.Connection extends EventEmitter
         while @base_delays[len - 2]? and @base_delays[len - 2].val >= val
             @base_delays.splice len - 2, 1
             --len
+
+
+class exports.Socket extends Connection
+    write: (data, encoding, cb) -> @send 0, data, encoding, cb
+    end: (data, encoding) -> @write data, encoding, -> super end
