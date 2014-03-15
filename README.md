@@ -11,17 +11,17 @@ uTP:  The Micro Transport Protocol
     - [socket.address()](#socketaddress)
     - [socket.unref()](#socketunref)
     - [socket.ref()](#socketref)
-    - socket.remoteAddress
-    - socket.remotePort
-    - socket.localAddress
-    - socket.localPort
-    - socket.bytesRead
-    - socket.bytesWritten
-    - Event: `connect`
-    - Event: `data`
-    - Event: `end`
-    - Event: `error`
-    - Event: `close`
+    - [socket.remoteAddress](#socketremoteaddress)
+    - [socket.remotePort](#socketremoteport)
+    - [socket.localAddress](#socketlocaladdress)
+    - [socket.localPort](#socketlocalport)
+    - [socket.bytesRead](#socketbytesread)
+    - [socket.bytesWritten](#socketbyteswritten)
+    - [Event: `connect`](#event-connect)
+    - [Event: `data`](#event-data)
+    - [Event: `end`](#event-end)
+    - [Event: `error`](#event-error)
+    - [Event: `close`](#event-close)
 
 
 uTP /Micro Transport Protocol
@@ -69,4 +69,41 @@ Calling `unref` on a socket will allow the program to exit if this is the only a
 #### socket.ref()
 Opposite of `unref`.  Calling `ref` on a previously `unref`d socket will *not* let the program exit if it's the only socket left (the default behavior).  If the socket is `ref`d calling `ref` again will have no effect.
 
+#### socket.remoteAddress
+The string representation of the remote IP address.
 
+#### socket.remotePort
+The numeric representation of the remote port.
+
+#### socket.localAddress
+The string representation of the local IP address the remote client is connecting on.
+
+#### socket.localPort
+The numeric representation of the local port.
+
+#### socket.bytesRead
+The amount of received bytes.
+
+#### socket.bytesWritten
+The amount of bytes sent.
+
+#### Event: `connect`
+Emitted when a socket is successfully established.  See `connect()`.
+
+#### Event: `data`
+- `Buffer object`
+
+Emitted when data is received.  The argument `data` will be a `Buffer` or `String`.  Encoding of data is set by `socket.setEncoding()`.
+
+Note that the **data will be lost** if there is no listener when a `Socket` emits a `data` event.
+
+#### Event: `end`
+Emitted when the other end of the socket sends a FIN packet.
+
+#### Event: `error`
+- `Error object`
+
+Emitted when an error occurs.  The `close` event will be called directly following this event.
+
+#### Event: `close`
+Emitted once the socket is fully closed.
