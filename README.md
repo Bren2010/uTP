@@ -2,16 +2,16 @@ uTP:  The Micro Transport Protocol
 ==================================
 
 - [uTP / Micro Transport Protocol](#utp-micro-transport-protocol)
-  - Class: uTP.Server
-    - new uTP.Server(port, [host], [callback])
-    - server.close([callback])
-    - server.address()
-    - server.unref()
-    - server.ref()
-    - Event: `listening`
-    - Event: `connection`
-    - Event: `close`
-    - Event: `error`
+  - [Class: uTP.Server](#class-utpserver)
+    - [new uTP.Server(port, [host], [callback])](#new-utpserverport-host-callback)
+    - [server.close([callback])](#serverclosecallback)
+    - [server.address()](#serveraddress)
+    - [server.unref()](#serverunref)
+    - [server.ref()](#serverref)
+    - [Event: `listening`](#event-listening)
+    - [Event: `connection`](#event-connection)
+    - [Event: `close`](#event-close)
+    - [Event: `error`](#event-error)
   - [Class: uTP.Socket](#class-utpsocket)
     - [new uTP.Socket([options])](#new-utpsocketoptions)
     - [socket.connect(port, [host], [connectListener])](#socketconnectport-host-connectlistener)
