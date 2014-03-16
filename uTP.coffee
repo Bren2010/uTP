@@ -8,9 +8,77 @@ dgram = require 'dgram'
 stream = require 'stream'
 {EventEmitter} = require 'events'
 
+class exports.Server extends EventEmitter
+    constructor: (port, host, cb) ->
+        @accepting = true
+        @sockets = {}
+        @nSocks = 0
+        
+        @socket = dgram.createSocket 'udp4'
+        @socket.bind port, host, cb
+        
+        @socket.on 'message', (msg, rinfo) =>
+            if msg.length >= 20
+                packet = @_parsePacket msg
+                connId = packet.conn_id
+                
+                if packet.type > 5 then return
+                if packet.ver isnt 1 then return
+                
+                if @sockets[connId]?
+                    @sockets[connId].socket.emit 'message', msg, rinfo
+                else if not @sockets[connId]? and packet.type is 4 and @accepting
+                    bus = new EventEmitter()
+                    bus.send = (buf, offset, length, port, address, cb) =>
+                        @socket.send buf, offset, length, port, address, cb
+                    
+                    ++@nSocks
+                    
+                    @sockets[connId] = new exports.Socket(fd: bus)
+                    @sockets[connId].socket.emit 'message', msg, rinfo
+                    @sockets[connId].on 'close', =>
+                        delete @sockets[connId]
+                        --@nSocks
+                        
+                        if @nSocks is 0 and not @accepting then @socket.close()
+                    
+                    @emit 'connection', @sockets[connId]
+        
+        @socket.on 'listening', => @emit 'listening'
+        @socket.on 'error', (err) =>
+            socket.socket.emit 'error', err for socket in @sockets
+            @emit 'error', err
+        
+        @socket.on 'close', => @emit 'close'
+    
+    close: (cb) ->
+        @accepting = false
+        
+        if @nSocks is 0 then @socket.close()
+        else @sockets[connId].end() for connId, socket of @sockets
+        
+        if cb? then @once 'close', cb
+    
+    address: -> @socket.address()
+    unref: -> @socket.ref()
+    ref: -> @socket.uref()
+    
+    _parsePacket: (msg) ->
+        first = msg.readUInt8(0)
+        
+        out =
+            type: (first & 240) / 16
+            ver: first & 15
+            conn_id: msg.readUInt16BE(2)
+        
+        out
+
 class exports.Socket extends stream.Duplex
     constructor: (opts) ->
-        stream.Duplex.call this, allowHalfOpen: false
+        if not this instanceof exports.Socket
+            return new exports.Socket opts
+        
+        stream.Duplex.call this, {allowHalfOpen : false}
         
         # Plumbing stuff
         @version = 1
@@ -48,14 +116,14 @@ class exports.Socket extends stream.Duplex
         @bytesWritten = 0
         
         # Operational logic
-        if opts?.fd? then @socket = fd
+        if opts?.fd? then @socket = opts.fd
         else @socket = dgram.createSocket 'udp4'
         
         cleanBaseDelays = =>
             for k, v of @_base_delays
                 if v.ts < (Date.now() - @cutoff) then @_base_delays.splice k, 1
         
-        setInterval cleanBaseDelays, 1000
+        @cleanIID = setInterval cleanBaseDelays, 1000
         
         @socket.on 'message', (msg, rinfo) =>
             packet = @_parsePacket msg
@@ -98,10 +166,7 @@ class exports.Socket extends stream.Duplex
                     if not ok then @reading = false
                 else @cache = Buffer.concat [@cache, packet.payload]
             
-            if packet.type is 1
-                @emit 'end'
-                @socket.close()
-            
+            if packet.type is 1 then @end()
             if packet.type is 2
                 if not @connected
                     @connected = true
@@ -109,7 +174,7 @@ class exports.Socket extends stream.Duplex
                 else
                     @emit 'ack', packet
             
-            if packet.type is 3 then @socket.close()
+            if packet.type is 3 then @end()
             if packet.type is 4 and not @connected
                 @connected = true
                 @remotePort = rinfo.port
@@ -124,7 +189,6 @@ class exports.Socket extends stream.Duplex
                 @emit 'connect'
         
         @socket.on 'error', (err) => @emit 'error', err
-        @socket.on 'close', => @emit 'close'
     
     connect: (port, host, connListener) ->
         @remotePort = port
@@ -230,6 +294,7 @@ class exports.Socket extends stream.Duplex
                 
                 @once 'ack', handler
                 timeoutTID = setTimeout handler, @timeout
+            else if cb? then cb()
         else
             # Wait for an ack and then retry sending the message.
             @once 'ack', => @_send type, data, encoding, cb
@@ -238,15 +303,14 @@ class exports.Socket extends stream.Duplex
     unref: -> @socket.unref()
     ref: -> @socket.ref()
     end: (data, encoding) ->
-        if data?
-            @write data, encoding, =>
-                @_send 1
-                @close()
-        else
-            @_send 1
-            @close()
+        super data, encoding, => @_send 1, null, null, => @close()
     
-    close: -> @socket.close()
+    close: ->
+        if @socket instanceof dgram.Socket
+            @socket.close()
+        
+        clearInterval @cleanIID
+        @emit 'close'
     
     _parsePacket: (msg) ->
         first = msg.readUInt8(0)
