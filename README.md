@@ -46,7 +46,7 @@ Create a new socket object.
     fd: null
 }
 ```
-`fd` allows you to specify the existing file descriptor of socket.
+`fd` allows you to specify the existing file descriptor of the socket.
 
 #### socket.connect(port, [host], [connectListener])
 Opens the connection for a given socket.  If `port` and `host` are given, then the socket will be opened as a uTP socket.  If `host` is omitted, `localhost` will be assumed. 
