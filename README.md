@@ -3,7 +3,7 @@ uTP:  The Micro Transport Protocol
 
 - [uTP / Micro Transport Protocol](#utp-micro-transport-protocol)
   - [Class: uTP.Socket](#class-utpsocket)
-    - [new uTP.Socket()](#new-utpsocket)
+    - [new uTP.Socket([options])](#new-utpsocketoptions)
     - [socket.connect(port, [host], [connectListener])](#socketconnectport-host-connectlistener)
     - [socket.setEncoding([encoding])](#socketsetencodingencoding)
     - [socket.write(data, [encoding], [callback])](#socketwritedata-encoding-callback)
@@ -35,17 +35,25 @@ Source: http://en.wikipedia.org/wiki/Micro_Transport_Protocol
 
 
 ### Class uTP.Socket
-This object is the abstraction of a uTP/UDP socekt.  `uTP.Socket` instances implement a duplex Stream interface.*  They can be created by the user and used as a client (with `connect()`) or they can be created by Node and passed to the user through the `connection` event of a server.
+This object is the abstraction of a uTP/UDP socekt.  `uTP.Socket` instances implement a duplex Stream interface.  They can be created by the user and used as a client (with `connect()`) or they can be created by Node and passed to the user through the `connection` event of a server.
 
-#### new uTP.Socket()
+#### new uTP.Socket([options])
 Create a new socket object.
+
+`options` is an object with the following defaults:
+```javascript
+{
+    fd: null
+}
+```
+`fd` allows you to specify the existing file descriptor of socket.
 
 #### socket.connect(port, [host], [connectListener])
 Opens the connection for a given socket.  If `port` and `host` are given, then the socket will be opened as a uTP socket.  If `host` is omitted, `localhost` will be assumed. 
 
 This function is asynchronous.  When the `connect` event is emitted, the socket is established.  If there is a problem connecting, the `connect` event will not be emitted; the `error` event will be emitted with the exception.
 
-The `connectListener` parameter will be added as a listener for the `connect` event.*
+The `connectListener` parameter will be added as a listener for the `connect` event.
 
 #### socket.setEncoding([encoding])
 Set the encoding for the socket as a readable stream.
@@ -56,7 +64,7 @@ Sends data on the socket.  The second parameter specifies the encoding in the ca
 The optional `callback` parameter will be executed when the data is finally written out--this may not be immediately.
 
 #### socket.end([data], [encoding])
-Half-closes the socket, i.e., it sends a FIN packet.  It is possible the server will still send some data.*
+Closes the socket, i.e., it sends a FIN packet.
 
 If `data` is specified, it is equivalent to calling `socket.write(data, encoding)` followed by `socket.end()`.
 

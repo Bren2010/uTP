@@ -4,12 +4,14 @@
 #    connections, while still utilizing the unused bandwidth fully.'
 #    - http://www.bittorrent.org/beps/bep_0029.html
 crypto = require 'crypto'
-stream = require 'stream'
 dgram = require 'dgram'
+stream = require 'stream'
 {EventEmitter} = require 'events'
 
-class Connection extends EventEmitter
-    constructor: ->
+class exports.Socket extends stream.Duplex
+    constructor: (opts) ->
+        stream.Duplex.call this, allowHalfOpen: false
+        
         # Plumbing stuff
         @version = 1
         @extension = 0
@@ -28,9 +30,12 @@ class Connection extends EventEmitter
         @rtt_var = 0 # Round trip time variance.
         @timeout = 1000 # Time in milliseconds to time out.
         @cutoff = 120000 # Base delay record cutoff.  2 minutes.
-        @base_delays = [] # Internal record of base delays.  Used to find min.
+        @_base_delays = [] # Internal record of base delays.  Used to find min.
         @CCONTROL_TARGET = 100000
         @MAX_CWND_INCREASE_PACKETS_PER_RTT = 3000
+        
+        @reading = false
+        @cache = new Buffer 0
         
         # Porcelain stuff
         @remotePort = null
@@ -42,14 +47,13 @@ class Connection extends EventEmitter
         @bytesRead = 0
         @bytesWritten = 0
         
-        @encoding = null
-        
         # Operational logic
-        @socket = dgram.createSocket 'udp4'
+        if opts?.fd? then @socket = fd
+        else @socket = dgram.createSocket 'udp4'
         
         cleanBaseDelays = =>
-            for k, v of @base_delays
-                if v.ts < (Date.now() - @cutoff) then @base_delays.splice k, 1
+            for k, v of @_base_delays
+                if v.ts < (Date.now() - @cutoff) then @_base_delays.splice k, 1
         
         setInterval cleanBaseDelays, 1000
         
@@ -81,16 +85,18 @@ class Connection extends EventEmitter
                         else @once 'sack', handler
                     
                     @once 'sack', handler
-                    @send 2
+                    @_send 2
                     return
             
             if packet.type is 0 and @connected
                 @bytesRead += packet.payload.length
                 @emit 'sack', @ack_nr
-                @send 2
+                @_send 2
                 
-                if not @encoding? then @emit 'data', packet.payload
-                else @emit 'data', packet.payload.toString(@encoding)
+                if @reading
+                    ok = @push packet.payload
+                    if not ok then @reading = false
+                else @cache = Buffer.concat [@cache, packet.payload]
             
             if packet.type is 1
                 @emit 'end'
@@ -114,7 +120,7 @@ class Connection extends EventEmitter
                 
                 @seq_nr = crypto.pseudoRandomBytes(2).readUInt16BE(0)
                 
-                @send 2
+                @_send 2
                 @emit 'connect'
         
         @socket.on 'error', (err) => @emit 'error', err
@@ -127,17 +133,26 @@ class Connection extends EventEmitter
         @snd_conn_id = crypto.pseudoRandomBytes(2).readUInt16BE(0)
         @rcv_conn_id = @snd_conn_id + 1
         
-        @send 4
+        @_send 4
         
+        if connListener? then @once 'connect', connListener
         @once 'connect', =>
-            if connListener? then connListener()
-            
             address = @address()
             
             @localPort = address.port
             @localAddress = address.address
     
-    send: (type, data, encoding, cb) ->
+    _read: ->
+        @reading = true
+        
+        if @cache.length isnt 0
+            ok = @push @cache
+            @cache = new Buffer 0
+            
+            if not ok then @reading = false
+    
+    _write: (data, encoding, cb) -> @_send 0, data, encoding, cb
+    _send: (type, data, encoding, cb) ->
         if not data? then data = new Buffer 0
         data = new Buffer data, encoding
         
@@ -181,7 +196,7 @@ class Connection extends EventEmitter
                         
                         @_push_base_delay(currTimestamp - timestamp)
                         
-                        our_delay = currTimestamp - timestamp
+                        our_delay = (currTimestamp - timestamp) - @_base_delay()
                         off_target = @CCONTROL_TARGET - our_delay
                         delay_factor = off_target / @CCONTROL_TARGET
                         window_factor = data.length / @max_window
@@ -208,7 +223,7 @@ class Connection extends EventEmitter
                         @timeout = @timeout * 2
                         
                         if data.length > 150
-                            @send type, data, encoding, cb
+                            @_send type, data, encoding, cb
                         else
                             @socket.send final, 0, final.length, @remotePort, @remoteAddress
                             timeoutTID = setTimeout handler, @timeout
@@ -217,15 +232,21 @@ class Connection extends EventEmitter
                 timeoutTID = setTimeout handler, @timeout
         else
             # Wait for an ack and then retry sending the message.
-            @once 'ack', => @send type, data, encoding, cb
+            @once 'ack', => @_send type, data, encoding, cb
     
-    setEncoding: (encoding) -> @encoding = encoding
     address: -> @socket.address()
     unref: -> @socket.unref()
     ref: -> @socket.ref()
-    end: ->
-        @send 1
-        @socket.close()
+    end: (data, encoding) ->
+        if data?
+            @write data, encoding, =>
+                @_send 1
+                @close()
+        else
+            @_send 1
+            @close()
+    
+    close: -> @socket.close()
     
     _parsePacket: (msg) ->
         first = msg.readUInt8(0)
@@ -244,17 +265,13 @@ class Connection extends EventEmitter
         
         out
     
-    base_delay: -> if @base_delays[0]? then @base_delays[0] else 100
+    _base_delay: -> if @_base_delays[0]? then @_base_delays[0].val else 100
     _push_base_delay: (val) ->
         timestamp = Date.now()
         
-        len = @base_delays.push val: val, ts: timestamp
+        len = @_base_delays.push val: val, ts: timestamp
         
-        while @base_delays[len - 2]? and @base_delays[len - 2].val >= val
-            @base_delays.splice len - 2, 1
+        while @_base_delays[len - 2]? and @_base_delays[len - 2].val >= val
+            @_base_delays.splice len - 2, 1
             --len
 
-
-class exports.Socket extends Connection
-    write: (data, encoding, cb) -> @send 0, data, encoding, cb
-    end: (data, encoding) -> @write data, encoding, -> super end
