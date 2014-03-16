@@ -2,6 +2,16 @@ uTP:  The Micro Transport Protocol
 ==================================
 
 - [uTP / Micro Transport Protocol](#utp-micro-transport-protocol)
+  - Class: uTP.Server
+    - new uTP.Server(port, [host], [callback])
+    - server.close([callback])
+    - server.address()
+    - server.unref()
+    - server.ref()
+    - Event: `listening`
+    - Event: `connection`
+    - Event: `close`
+    - Event: `error`
   - [Class: uTP.Socket](#class-utpsocket)
     - [new uTP.Socket([options])](#new-utpsocketoptions)
     - [socket.connect(port, [host], [connectListener])](#socketconnectport-host-connectlistener)
@@ -32,6 +42,43 @@ Micro Transport Protocol or µTP (sometimes also uTP) is an open UDP-based varia
 It was devised to automatically slow down the rate at which packets of data are transmitted between users of peer-to-peer file sharing torrents when it interferes with other applications. For example, the protocol should automatically allow the sharing of an ADSL line between a BitTorrent application and a web browser.
 
 Source: http://en.wikipedia.org/wiki/Micro_Transport_Protocol
+
+
+### Class uTP.Server
+This class is used to create a uTP server.
+
+#### new uTP.Server(port, [host], [callback])
+Begin accepting connections on the specified `port` and `host`.  If the `host` is omitted, the server will accept connections directed to any IPv4 address.  A port value of zero will assign to a random port.
+
+This function is asynchronous.  When the server has been bound, `listening` event will be omitted.  The last parameter `callback` will be added as a listener for the `listening` event.
+
+#### server.close([callback])
+Stops the server from accepting new connections and keeps existing connections.  This function is asynchronous.  The server is finally closed when all connections are ended and the server emits a `close` event.  Optionally, you can pass a callback to listen for the `close` event.
+
+#### server.address()
+Returns the bound address, the address family name and port of the socket as reported by the operating system.
+
+#### server.unref()
+Calling `unref` on a server will allow the program to exit if this is the only active server in the event system.  If the server is already `unref`d, then calling `unref` again will have no effect.
+
+#### server.ref()
+Opposite of `unref`.  Calling `ref` on a previously `unref`d server will *not* let the program exit if it's the only server left (the default behavior).  If the server is `ref`d, calling `ref` again will have no effect.
+
+#### Event: `listening`
+Emitted when the server has been bound.
+
+#### Event: `connection`
+- `Socket Object` The connection object
+
+Emitted when a new connection is made.  `socket` is an instance of `uTP.Socket`
+
+#### Event: `close`
+Emitted when the server closes.  Note that if connections exist, this event is not emitted until all connections are ended.
+
+#### Event: `error`
+- `Error Object`
+
+Emitted when an error occurs.  The `close` event will be called directly following this event.
 
 
 ### Class uTP.Socket
