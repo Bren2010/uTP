@@ -6,6 +6,7 @@
 crypto = require 'crypto'
 dgram = require 'dgram'
 stream = require 'stream'
+async = require 'async'
 {EventEmitter} = require 'events'
 
 class exports.Server extends EventEmitter
@@ -138,13 +139,13 @@ class exports.Socket extends stream.Duplex
             
             # Handle acks exclusively.
             if @connected
-                len = packet.payload.length
+                [next_sq, l] = [((@ack_nr + 1) % 65536), packet.payload.length]
                 
                 if @ack_nr is null
                     @ack_nr = packet.seq_nr
-                else if packet.seq_nr is ((@ack_nr + 1) % 65536) and len isnt 0
+                else if packet.seq_nr is next_sq and l > 0
                     @ack_nr = packet.seq_nr
-                else if packet.seq_nr is @ack_nr and len is 0
+                else if packet.seq_nr is @ack_nr and l is 0
                     # Do nothing
                 else
                     handler = (ack_nr) =>
@@ -153,13 +154,13 @@ class exports.Socket extends stream.Duplex
                         else @once 'sack', handler
                     
                     @once 'sack', handler
-                    @_send 2
+                    @writeQueue.push type: 2
                     return
             
             if packet.type is 0 and @connected
                 @bytesRead += packet.payload.length
                 @emit 'sack', @ack_nr
-                @_send 2
+                @writeQueue.push type: 2
                 
                 if @reading
                     ok = @push packet.payload
@@ -185,10 +186,135 @@ class exports.Socket extends stream.Duplex
                 
                 @seq_nr = crypto.pseudoRandomBytes(2).readUInt16BE(0)
                 
-                @_send 2
+                @writeQueue.push type: 2
                 @emit 'connect'
         
         @socket.on 'error', (err) => @emit 'error', err
+        
+        writer = (task, next) =>
+            if not task.data? then data = new Buffer 0
+            else data = new Buffer task.data, task.encoding
+            
+            if (@cur_window + data.length) <= Math.min(@max_window, @wnd_size)
+                # The data is a good length to be send immediately.
+                first = (16 * task.type) | @version
+                timestamp = Math.round(process.hrtime()[1] / 1000)
+                
+                if data.length isnt 0
+                    @cur_window += data.length
+                    @seq_nr = (@seq_nr + 1) % 65536
+                
+                out = new Buffer 20
+                out.writeUInt8 first, 0
+                out.writeUInt8 @extension, 1
+                out.writeUInt16BE @snd_conn_id, 2
+                out.writeUInt32BE timestamp, 4
+                out.writeInt32BE @reply_micro, 8
+                out.writeUInt32BE Math.max(0, @max_window - @cur_window), 12
+                out.writeUInt16BE @seq_nr, 16
+                out.writeUInt16BE @ack_nr, 18
+                
+                final = Buffer.concat [out, data]
+                
+                # Send the message and wait for an ack.
+                [seq_nr, i, timeoutTID] = [@seq_nr, 0, null]
+                
+                handler = (packet) =>
+                    if packet? and packet.ack_nr >= seq_nr
+                        clearTimeout timeoutTID
+                        currTimestamp = Math.round(process.hrtime()[1] / 1000)
+                        
+                        @bytesWritten += data.length
+                        @cur_window -= data.length
+                        
+                        tmp = (@reply_micro + packet.reply_micro) / 1000
+                        delta = @rtt - tmp
+                        @rtt_var += (Math.abs(delta) - @rtt_var) / 4
+                        @rtt += (tmp - @rtt) / 8
+                        
+                        lastTimeout = @timeout
+                        @timeout = Math.max(Math.round(@rtt + @rtt_var * 4), 500)
+                        if @timeout > 6000 then @timeout = lastTimeout
+                        
+                        @_push_base_delay(tmp)
+                        
+                        our_delay = tmp - @_base_delay()
+                        off_target = @CCONTROL_TARGET - our_delay
+                        delay_factor = off_target / @CCONTROL_TARGET
+                        window_factor = data.length / @max_window
+                        scaled_gain = @MAX_CWND_INCREASE_PACKETS_PER_RTT * delay_factor * window_factor
+                        @max_window += Math.round(scaled_gain)
+                        
+                        if @max_window < 0 then @max_window = 0
+                        
+                        if task.cb? then task.cb()
+                        next()
+                    else if packet?
+                        if @resend is 0 then ++i
+                        else --@resend
+                        
+                        if i is 3
+                            @resend = @listeners('ack').length
+                            @max_window = Math.max(150, Math.ceil(0.5 * @max_window))
+                            i = 0
+                            
+                            @socket.send final, 0, final.length, @remotePort, @remoteAddress
+                            
+                        @once 'ack', handler
+                        timeoutTID = setTimeout handler, @timeout
+                    else
+                        @max_window = 150
+                        @timeout = @timeout * 2
+                        
+                        # All of the data is resent despite max_window
+                        # requirements.
+                        @socket.send final, 0, final.length, @remotePort, @remoteAddress
+                        
+                        @once 'ack', handler
+                        timeoutTID = setTimeout handler, @timeout
+                
+                if task.type is 0
+                    @once 'ack', handler
+                    timeoutTID = setTimeout handler, @timeout
+                
+                @socket.send final, 0, final.length, @remotePort, @remoteAddress, ->
+                    if task.type isnt 0
+                        if task.cb? then task.cb()
+                        next()
+            else if (Math.min(@max_window, @wnd_size) - @cur_window) <= 0
+                # There's no room for the message to be sent at all.
+                # Wait for an ack and then retry sending the message.
+                # Put more effort into this once packets can be sent async.
+                # console.log 'stowed', @max_window, @wnd_size, @cur_window, @timeout
+                @writeQueue.unshift task
+                @once 'ack', ->
+                    # console.log 'got ack!'
+                    next()
+            else
+                # Send only part of the message and send the rest later.
+                cutoff = Math.min(@max_window, @wnd_size) - @cur_window
+                chunks = []
+                
+                while data.length isnt 0
+                    newTask =
+                        type: task.type
+                        data: data.slice 0, cutoff
+                        encoding: null
+                        cb: null
+                    
+                    chunks.push newTask
+                    data = data.slice cutoff
+                
+                pos = chunks.length - 1
+                chunks[pos].cb = task.cb
+                
+                while pos >= 0
+                    @writeQueue.unshift chunks[pos]
+                    --pos
+                
+                next()
+        
+        @writeQueue = async.queue writer, 1
     
     connect: (port, host, connListener) ->
         @remotePort = port
@@ -197,7 +323,7 @@ class exports.Socket extends stream.Duplex
         @snd_conn_id = crypto.pseudoRandomBytes(2).readUInt16BE(0)
         @rcv_conn_id = @snd_conn_id + 1
         
-        @_send 4
+        @writeQueue.push type: 4
         
         if connListener? then @once 'connect', connListener
         @once 'connect', =>
@@ -215,102 +341,28 @@ class exports.Socket extends stream.Duplex
             
             if not ok then @reading = false
     
-    _write: (data, encoding, cb) -> @_send 0, data, encoding, cb
-    _send: (type, data, encoding, cb) ->
-        if not data? then data = new Buffer 0
-        data = new Buffer data, encoding
+    _write: (data, encoding, cb) ->
+        @writeQueue.push type: 0, data: data, encoding: encoding, cb: cb
         
-        if (@cur_window + data.length) <= Math.min(@max_window, @wnd_size)
-            first = (16 * type) | @version
-            timestamp = Math.round(process.hrtime()[1] / 1000)
-            
-            if data.length isnt 0
-                @cur_window += data.length
-                @seq_nr = (@seq_nr + 1) % 65536
-            
-            out = new Buffer 20
-            out.writeUInt8 first, 0
-            out.writeUInt8 @extension, 1
-            out.writeUInt16BE @snd_conn_id, 2
-            out.writeUInt32BE timestamp, 4
-            out.writeInt32BE @reply_micro, 8
-            out.writeUInt32BE Math.max(0, @max_window - @cur_window), 12
-            out.writeUInt16BE @seq_nr, 16
-            out.writeUInt16BE @ack_nr, 18
-            
-            final = Buffer.concat [out, data]
-            
-            # Send the message and wait for an ack.
-            @socket.send final, 0, final.length, @remotePort, @remoteAddress
-            
-            if type is 0
-                [seq_nr, i, timeoutTID] = [@seq_nr, 0, null]
-                
-                handler = (packet) =>
-                    if packet? and packet.ack_nr >= seq_nr
-                        clearTimeout timeoutTID
-                        currTimestamp = Math.round(process.hrtime()[1] / 1000)
-                        
-                        @bytesWritten += data.length
-                        @cur_window -= data.length
-                        delta = @rtt - (currTimestamp - timestamp)
-                        @rtt_var += (Math.abs(delta) - @rtt_var) / 4
-                        @rtt += ((@reply_micro + packet.reply_micro) - @rtt) / 8
-                        @timeout = Math.max(@rtt + @rtt_var * 4, 500)
-                        
-                        @_push_base_delay(currTimestamp - timestamp)
-                        
-                        our_delay = (currTimestamp - timestamp) - @_base_delay()
-                        off_target = @CCONTROL_TARGET - our_delay
-                        delay_factor = off_target / @CCONTROL_TARGET
-                        window_factor = data.length / @max_window
-                        scaled_gain = @MAX_CWND_INCREASE_PACKETS_PER_RTT * delay_factor * window_factor
-                        @max_window += Math.round(scaled_gain)
-                        
-                        if @max_window < 0 then @max_window = 0
-                        
-                        if cb? then cb()
-                    else if packet?
-                        if @resend is 0 then ++i
-                        else --@resend
-                        
-                        if i is 3
-                            @resend = @listeners('ack').length
-                            @max_window = Math.max(150, Math.ceil(0.5 * @max_window))
-                            i = 0
-                            
-                            @socket.send final, 0, final.length, @remotePort, @remoteAddress
-                            
-                        @once 'ack', handler
-                    else
-                        @max_window = 150
-                        @timeout = @timeout * 2
-                        
-                        if data.length > 150
-                            @_send type, data, encoding, cb
-                        else
-                            @socket.send final, 0, final.length, @remotePort, @remoteAddress
-                            timeoutTID = setTimeout handler, @timeout
-                
-                @once 'ack', handler
-                timeoutTID = setTimeout handler, @timeout
-            else if cb? then cb()
-        else
-            # Wait for an ack and then retry sending the message.
-            @once 'ack', => @_send type, data, encoding, cb
+        false
     
     address: -> @socket.address()
     unref: -> @socket.unref()
     ref: -> @socket.ref()
     end: (data, encoding) ->
-        super data, encoding, => @_send 1, null, null, => @close()
+        @_clean()
+        super data, encoding, =>
+            @emit 'end'
+            @writeQueue.push {type: 1}, => @close()
     
     close: ->
-        if @socket instanceof dgram.Socket
-            @socket.close()
-        
-        clearInterval @cleanIID
+        if @socket instanceof dgram.Socket then @socket.close()
+        @_clean()
         @emit 'close'
+    
+    _clean: ->
+        if @cleanIID? then clearInterval @cleanIID
+        @cleanIID = null
     
     _parsePacket: (msg) ->
         first = msg.readUInt8(0)
